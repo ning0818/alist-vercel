@@ -1,172 +1,257 @@
 package mediatrack
 
 import (
-	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"net/http"
-	"strconv"
-	"time"
-
-	"github.com/alist-org/alist/v3/drivers/base"
-	"github.com/alist-org/alist/v3/internal/driver"
-	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/pkg/utils"
+	"github.com/Xhofe/alist/conf"
+	"github.com/Xhofe/alist/drivers/base"
+	"github.com/Xhofe/alist/model"
+	"github.com/Xhofe/alist/utils"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
 	log "github.com/sirupsen/logrus"
+	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 )
 
-type MediaTrack struct {
-	model.Storage
-	Addition
+type MediaTrack struct{}
+
+func (driver MediaTrack) Config() base.DriverConfig {
+	return base.DriverConfig{
+		Name: "MediaTrack",
+	}
 }
 
-func (d *MediaTrack) Config() driver.Config {
-	return config
+func (driver MediaTrack) Items() []base.Item {
+	return []base.Item{
+		{
+			Name:        "access_token",
+			Label:       "Token",
+			Type:        base.TypeString,
+			Description: "Unknown expiration time",
+			Required:    true,
+		},
+		{
+			Name:     "root_folder",
+			Label:    "root folder file_id",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "order_by",
+			Label:    "order_by",
+			Type:     base.TypeSelect,
+			Values:   "updated_at,title,size",
+			Required: true,
+		},
+		{
+			Name:     "order_direction",
+			Label:    "desc",
+			Type:     base.TypeSelect,
+			Values:   "true,false",
+			Required: true,
+		},
+	}
 }
 
-func (d *MediaTrack) GetAddition() driver.Additional {
-	return &d.Addition
-}
-
-func (d *MediaTrack) Init(ctx context.Context) error {
-	_, err := d.request("https://kayle.api.mediatrack.cn/users", http.MethodGet, nil, nil)
-	return err
-}
-
-func (d *MediaTrack) Drop(ctx context.Context) error {
+func (driver MediaTrack) Save(account *model.Account, old *model.Account) error {
+	if account == nil {
+		return nil
+	}
 	return nil
 }
 
-func (d *MediaTrack) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.getFiles(dir.GetID())
-	if err != nil {
-		return nil, err
-	}
-	return utils.SliceConvert(files, func(f File) (model.Obj, error) {
-		size, _ := strconv.ParseInt(f.Size, 10, 64)
-		thumb := ""
-		if f.File != nil && f.File.Cover != "" {
-			thumb = "https://nano.mtres.cn/" + f.File.Cover
-		}
-		return &Object{
-			Object: model.Object{
-				ID:       f.ID,
-				Name:     f.Title,
-				Modified: f.UpdatedAt,
-				IsFolder: f.File == nil,
-				Size:     size,
-			},
-			Thumbnail: model.Thumbnail{Thumbnail: thumb},
-			ParentID:  dir.GetID(),
+func (driver MediaTrack) File(path string, account *model.Account) (*model.File, error) {
+	path = utils.ParsePath(path)
+	if path == "/" {
+		return &model.File{
+			Id:        account.RootFolder,
+			Name:      account.Name,
+			Size:      0,
+			Type:      conf.FOLDER,
+			Driver:    driver.Config().Name,
+			UpdatedAt: account.UpdatedAt,
 		}, nil
-	})
-}
-
-func (d *MediaTrack) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	url := fmt.Sprintf("https://kayn.api.mediatrack.cn/v1/download_token/asset?asset_id=%s&source_type=project&password=&source_id=%s",
-		file.GetID(), d.ProjectID)
-	log.Debugf("media track url: %s", url)
-	body, err := d.request(url, http.MethodGet, nil, nil)
+	}
+	dir, name := filepath.Split(path)
+	files, err := driver.Files(dir, account)
 	if err != nil {
 		return nil, err
 	}
-	token := utils.Json.Get(body, "data", "token").ToString()
-	url = "https://kayn.api.mediatrack.cn/v1/download/redirect?token=" + token
-	res, err := base.NoRedirectClient.R().Get(url)
+	for _, file := range files {
+		if file.Name == name {
+			return &file, nil
+		}
+	}
+	return nil, base.ErrPathNotFound
+}
+
+func (driver MediaTrack) Files(path string, account *model.Account) ([]model.File, error) {
+	path = utils.ParsePath(path)
+	var files []model.File
+	cache, err := base.GetCache(path, account)
+	if err == nil {
+		files, _ = cache.([]model.File)
+	} else {
+		file, err := driver.File(path, account)
+		if err != nil {
+			return nil, err
+		}
+		files, err = driver.GetFiles(file.Id, account)
+		if err != nil {
+			return nil, err
+		}
+		if len(files) > 0 {
+			_ = base.SetCache(path, files, account)
+		}
+	}
+	return files, nil
+}
+
+func (driver MediaTrack) Link(args base.Args, account *model.Account) (*base.Link, error) {
+	file, err := driver.File(args.Path, account)
 	if err != nil {
 		return nil, err
 	}
-	log.Debug(res.String())
-	link := model.Link{
-		URL: url,
+	pre := "https://jayce.api.mediatrack.cn/v3/assets/" + file.Id
+	body, err := driver.Request(pre+"/token", base.Get, nil, nil, nil, nil, nil, account)
+	if err != nil {
+		return nil, err
 	}
-	log.Debugln("res code: ", res.StatusCode())
-	if res.StatusCode() == 302 {
-		link.URL = res.Header().Get("location")
-		expired := time.Duration(60) * time.Second
-		link.Expiration = &expired
-	}
-	return &link, nil
+	url := pre + "/raw"
+	res, err := base.NoRedirectClient.R().SetQueryParam("token", jsoniter.Get(body, "data").ToString()).Get(url)
+	return &base.Link{Url: res.Header().Get("location")}, nil
 }
 
-func (d *MediaTrack) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	url := fmt.Sprintf("https://jayce.api.mediatrack.cn/v3/assets/%s/children", parentDir.GetID())
-	_, err := d.request(url, http.MethodPost, func(req *resty.Request) {
-		req.SetBody(base.Json{
-			"type":  1,
-			"title": dirName,
-		})
-	}, nil)
+func (driver MediaTrack) Path(path string, account *model.Account) (*model.File, []model.File, error) {
+	path = utils.ParsePath(path)
+	log.Debugf("MediaTrack path: %s", path)
+	file, err := driver.File(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !file.IsDir() {
+		return file, nil, nil
+	}
+	files, err := driver.Files(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, files, nil
+}
+
+//func (driver MediaTrack) Proxy(r *http.Request, account *model.Account) {
+//
+//}
+
+func (driver MediaTrack) Preview(path string, account *model.Account) (interface{}, error) {
+	return nil, base.ErrNotImplement
+}
+
+func (driver MediaTrack) MakeDir(path string, account *model.Account) error {
+	_, err := driver.File(path, account)
+	if err != base.ErrPathNotFound {
+		return nil
+	}
+	parentFile, err := driver.File(utils.Dir(path), account)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf("https://jayce.api.mediatrack.cn/v3/assets/%s/children", parentFile.Id)
+	_, err = driver.Request(url, base.Post, nil, nil, nil, base.Json{
+		"type":  1,
+		"title": utils.Base(path),
+	}, nil, account)
 	return err
 }
 
-func (d *MediaTrack) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
+func (driver MediaTrack) Move(src string, dst string, account *model.Account) error {
+	srcFile, err := driver.File(src, account)
+	if err != nil {
+		return err
+	}
+	dstParentFile, err := driver.File(utils.Dir(dst), account)
+	if err != nil {
+		return err
+	}
 	data := base.Json{
-		"parent_id": dstDir.GetID(),
-		"ids":       []string{srcObj.GetID()},
+		"parent_id": dstParentFile.Id,
+		"ids":       []string{srcFile.Id},
 	}
 	url := "https://jayce.api.mediatrack.cn/v4/assets/batch/move"
-	_, err := d.request(url, http.MethodPost, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	_, err = driver.Request(url, base.Post, nil, nil, nil, data, nil, account)
 	return err
 }
 
-func (d *MediaTrack) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	url := "https://jayce.api.mediatrack.cn/v3/assets/" + srcObj.GetID()
-	data := base.Json{
-		"title": newName,
+func (driver MediaTrack) Rename(src string, dst string, account *model.Account) error {
+	srcFile, err := driver.File(src, account)
+	if err != nil {
+		return err
 	}
-	_, err := d.request(url, http.MethodPut, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	url := "https://jayce.api.mediatrack.cn/v3/assets/" + srcFile.Id
+	data := base.Json{
+		"title": utils.Base(dst),
+	}
+	_, err = driver.Request(url, base.Put, nil, nil, nil, data, nil, account)
 	return err
 }
 
-func (d *MediaTrack) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
+func (driver MediaTrack) Copy(src string, dst string, account *model.Account) error {
+	srcFile, err := driver.File(src, account)
+	if err != nil {
+		return err
+	}
+	dstParentFile, err := driver.File(utils.Dir(dst), account)
+	if err != nil {
+		return err
+	}
 	data := base.Json{
-		"parent_id": dstDir.GetID(),
-		"ids":       []string{srcObj.GetID()},
+		"parent_id": dstParentFile.Id,
+		"ids":       []string{srcFile.Id},
 	}
 	url := "https://jayce.api.mediatrack.cn/v4/assets/batch/clone"
-	_, err := d.request(url, http.MethodPost, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	_, err = driver.Request(url, base.Post, nil, nil, nil, data, nil, account)
 	return err
 }
 
-func (d *MediaTrack) Remove(ctx context.Context, obj model.Obj) error {
-	var parentID string
-	if o, ok := obj.(*Object); ok {
-		parentID = o.ParentID
-	} else {
-		return fmt.Errorf("obj is not local Object")
+func (driver MediaTrack) Delete(path string, account *model.Account) error {
+	parentFile, err := driver.File(utils.Dir(path), account)
+	if err != nil {
+		return err
+	}
+	file, err := driver.File(path, account)
+	if err != nil {
+		return err
 	}
 	data := base.Json{
-		"origin_id": parentID,
-		"ids":       []string{obj.GetID()},
+		"origin_id": parentFile.Id,
+		"ids":       []string{file.Id},
 	}
 	url := "https://jayce.api.mediatrack.cn/v4/assets/batch/delete"
-	_, err := d.request(url, http.MethodDelete, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	_, err = driver.Request(url, base.Delete, nil, nil, nil, data, nil, account)
 	return err
 }
 
-func (d *MediaTrack) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
+func (driver MediaTrack) Upload(file *model.FileStream, account *model.Account) error {
+	if file == nil {
+		return base.ErrEmptyFile
+	}
+	parentFile, err := driver.File(file.ParentPath, account)
+	if err != nil {
+		return err
+	}
 	src := "assets/" + uuid.New().String()
 	var resp UploadResp
-	_, err := d.request("https://jayce.api.mediatrack.cn/v3/storage/tokens/asset", http.MethodGet, func(req *resty.Request) {
-		req.SetQueryParam("src", src)
-	}, &resp)
+	_, err = driver.Request("https://jayce.api.mediatrack.cn/v3/storage/tokens/asset", base.Get, nil, map[string]string{
+		"src": src,
+	}, nil, nil, &resp, account)
 	if err != nil {
 		return err
 	}
@@ -180,24 +265,33 @@ func (d *MediaTrack) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 	if err != nil {
 		return err
 	}
-	tempFile, err := stream.CacheFullInTempFile()
+	tempFile, err := ioutil.TempFile("data/temp", "file-*")
 	if err != nil {
 		return err
 	}
 	defer func() {
 		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
 	}()
+	_, err = io.Copy(tempFile, file)
+	if err != nil {
+		return err
+	}
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
 	uploader := s3manager.NewUploader(s)
 	input := &s3manager.UploadInput{
 		Bucket: &resp.Data.Bucket,
 		Key:    &resp.Data.Object,
 		Body:   tempFile,
 	}
-	_, err = uploader.UploadWithContext(ctx, input)
+	_, err = uploader.Upload(input)
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("https://jayce.api.mediatrack.cn/v3/assets/%s/children", dstDir.GetID())
+	url := fmt.Sprintf("https://jayce.api.mediatrack.cn/v3/assets/%s/children", parentFile.Id)
 	_, err = tempFile.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
@@ -210,18 +304,16 @@ func (d *MediaTrack) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 	hash := hex.EncodeToString(h.Sum(nil))
 	data := base.Json{
 		"category":    0,
-		"description": stream.GetName(),
+		"description": file.GetFileName(),
 		"hash":        hash,
-		"mime":        stream.GetMimetype(),
-		"size":        stream.GetSize(),
+		"mime":        file.MIMEType,
+		"size":        file.GetSize(),
 		"src":         src,
-		"title":       stream.GetName(),
+		"title":       file.GetFileName(),
 		"type":        0,
 	}
-	_, err = d.request(url, http.MethodPost, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	_, err = driver.Request(url, base.Post, nil, nil, nil, data, nil, account)
 	return err
 }
 
-var _ driver.Driver = (*MediaTrack)(nil)
+var _ base.Driver = (*MediaTrack)(nil)

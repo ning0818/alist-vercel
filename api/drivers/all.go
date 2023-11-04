@@ -1,58 +1,46 @@
 package drivers
 
 import (
-	_ "github.com/alist-org/alist/v3/drivers/115"
-	_ "github.com/alist-org/alist/v3/drivers/123"
-	_ "github.com/alist-org/alist/v3/drivers/123_link"
-	_ "github.com/alist-org/alist/v3/drivers/123_share"
-	_ "github.com/alist-org/alist/v3/drivers/139"
-	_ "github.com/alist-org/alist/v3/drivers/189"
-	_ "github.com/alist-org/alist/v3/drivers/189pc"
-	_ "github.com/alist-org/alist/v3/drivers/alias"
-	_ "github.com/alist-org/alist/v3/drivers/alist_v2"
-	_ "github.com/alist-org/alist/v3/drivers/alist_v3"
-	_ "github.com/alist-org/alist/v3/drivers/aliyundrive"
-	_ "github.com/alist-org/alist/v3/drivers/aliyundrive_open"
-	_ "github.com/alist-org/alist/v3/drivers/aliyundrive_share"
-	_ "github.com/alist-org/alist/v3/drivers/baidu_netdisk"
-	_ "github.com/alist-org/alist/v3/drivers/baidu_photo"
-	_ "github.com/alist-org/alist/v3/drivers/baidu_share"
-	_ "github.com/alist-org/alist/v3/drivers/cloudreve"
-	_ "github.com/alist-org/alist/v3/drivers/crypt"
-	_ "github.com/alist-org/alist/v3/drivers/dropbox"
-	_ "github.com/alist-org/alist/v3/drivers/ftp"
-	_ "github.com/alist-org/alist/v3/drivers/google_drive"
-	_ "github.com/alist-org/alist/v3/drivers/google_photo"
-	_ "github.com/alist-org/alist/v3/drivers/ipfs_api"
-	_ "github.com/alist-org/alist/v3/drivers/lanzou"
-	_ "github.com/alist-org/alist/v3/drivers/local"
-	_ "github.com/alist-org/alist/v3/drivers/mediatrack"
-	_ "github.com/alist-org/alist/v3/drivers/mega"
-	_ "github.com/alist-org/alist/v3/drivers/mopan"
-	_ "github.com/alist-org/alist/v3/drivers/onedrive"
-	_ "github.com/alist-org/alist/v3/drivers/onedrive_app"
-	_ "github.com/alist-org/alist/v3/drivers/pikpak"
-	_ "github.com/alist-org/alist/v3/drivers/pikpak_share"
-	_ "github.com/alist-org/alist/v3/drivers/quark_uc"
-	_ "github.com/alist-org/alist/v3/drivers/s3"
-	_ "github.com/alist-org/alist/v3/drivers/seafile"
-	_ "github.com/alist-org/alist/v3/drivers/sftp"
-	_ "github.com/alist-org/alist/v3/drivers/smb"
-	_ "github.com/alist-org/alist/v3/drivers/teambition"
-	_ "github.com/alist-org/alist/v3/drivers/terabox"
-	_ "github.com/alist-org/alist/v3/drivers/thunder"
-	_ "github.com/alist-org/alist/v3/drivers/trainbit"
-	_ "github.com/alist-org/alist/v3/drivers/url_tree"
-	_ "github.com/alist-org/alist/v3/drivers/uss"
-	_ "github.com/alist-org/alist/v3/drivers/virtual"
-	_ "github.com/alist-org/alist/v3/drivers/webdav"
-	_ "github.com/alist-org/alist/v3/drivers/weiyun"
-	_ "github.com/alist-org/alist/v3/drivers/wopan"
-	_ "github.com/alist-org/alist/v3/drivers/yandex_disk"
+	_ "github.com/Xhofe/alist/drivers/123"
+	_ "github.com/Xhofe/alist/drivers/139"
+	_ "github.com/Xhofe/alist/drivers/189"
+	_ "github.com/Xhofe/alist/drivers/alidrive"
+	_ "github.com/Xhofe/alist/drivers/alist"
+	_ "github.com/Xhofe/alist/drivers/baidu"
+	"github.com/Xhofe/alist/drivers/base"
+	_ "github.com/Xhofe/alist/drivers/ftp"
+	_ "github.com/Xhofe/alist/drivers/google"
+	_ "github.com/Xhofe/alist/drivers/lanzou"
+	_ "github.com/Xhofe/alist/drivers/mediatrack"
+	_ "github.com/Xhofe/alist/drivers/native"
+	_ "github.com/Xhofe/alist/drivers/onedrive"
+	_ "github.com/Xhofe/alist/drivers/pikpak"
+	_ "github.com/Xhofe/alist/drivers/s3"
+	_ "github.com/Xhofe/alist/drivers/shandian"
+	_ "github.com/Xhofe/alist/drivers/teambition"
+	_ "github.com/Xhofe/alist/drivers/webdav"
+	_ "github.com/Xhofe/alist/drivers/yandex"
+	log "github.com/sirupsen/logrus"
+	"strings"
 )
 
-// All do nothing,just for import
-// same as _ import
-func All() {
+var NoCors string
+var NoUpload string
 
+func GetConfig() {
+	for k, v := range base.GetDriversMap() {
+		if v.Config().NoCors {
+			NoCors += k + ","
+		}
+		if v.Upload(nil, nil) != base.ErrEmptyFile {
+			NoUpload += k + ","
+		}
+	}
+	NoCors = strings.Trim(NoCors, ",")
+	NoUpload += "root"
+}
+
+func init() {
+	log.Debug("all init")
+	GetConfig()
 }

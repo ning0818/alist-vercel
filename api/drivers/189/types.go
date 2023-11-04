@@ -1,17 +1,11 @@
-package _189
+package _89
 
-type LoginResp struct {
-	Msg    string `json:"msg"`
-	Result int    `json:"result"`
-	ToUrl  string `json:"toUrl"`
-}
-
-type Error struct {
+type Cloud189Error struct {
 	ErrorCode string `json:"errorCode"`
 	ErrorMsg  string `json:"errorMsg"`
 }
 
-type File struct {
+type Cloud189File struct {
 	Id         int64  `json:"id"`
 	LastOpTime string `json:"lastOpTime"`
 	Name       string `json:"name"`
@@ -23,19 +17,19 @@ type File struct {
 	Url string `json:"url"`
 }
 
-type Folder struct {
+type Cloud189Folder struct {
 	Id         int64  `json:"id"`
 	LastOpTime string `json:"lastOpTime"`
 	Name       string `json:"name"`
 }
 
-type Files struct {
+type Cloud189Files struct {
 	ResCode    int    `json:"res_code"`
 	ResMessage string `json:"res_message"`
 	FileListAO struct {
-		Count      int      `json:"count"`
-		FileList   []File   `json:"fileList"`
-		FolderList []Folder `json:"folderList"`
+		Count      int              `json:"count"`
+		FileList   []Cloud189File   `json:"fileList"`
+		FolderList []Cloud189Folder `json:"folderList"`
 	} `json:"fileListAO"`
 }
 
@@ -49,20 +43,13 @@ type Part struct {
 	RequestHeader string `json:"requestHeader"`
 }
 
+//type Info struct {
+//	SessionKey string
+//	Rsa        Rsa
+//}
+
 type Rsa struct {
 	Expire int64  `json:"expire"`
 	PkId   string `json:"pkId"`
 	PubKey string `json:"pubKey"`
-}
-
-type Down struct {
-	ResCode         int    `json:"res_code"`
-	ResMessage      string `json:"res_message"`
-	FileDownloadUrl string `json:"fileDownloadUrl"`
-}
-
-type DownResp struct {
-	ResCode         int    `json:"res_code"`
-	ResMessage      string `json:"res_message"`
-	FileDownloadUrl string `json:"downloadUrl"`
 }

@@ -1,106 +1,185 @@
 package webdav
 
 import (
-	"context"
-	"net/http"
-	"os"
-	"path"
-	"time"
-
-	"github.com/alist-org/alist/v3/internal/driver"
-	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/pkg/cron"
-	"github.com/alist-org/alist/v3/pkg/gowebdav"
-	"github.com/alist-org/alist/v3/pkg/utils"
+	"github.com/Xhofe/alist/conf"
+	"github.com/Xhofe/alist/drivers/base"
+	"github.com/Xhofe/alist/model"
+	"github.com/Xhofe/alist/utils"
+	"path/filepath"
 )
 
-type WebDav struct {
-	model.Storage
-	Addition
-	client *gowebdav.Client
-	cron   *cron.Cron
-}
+type WebDav struct{}
 
-func (d *WebDav) Config() driver.Config {
-	return config
-}
-
-func (d *WebDav) GetAddition() driver.Additional {
-	return &d.Addition
-}
-
-func (d *WebDav) Init(ctx context.Context) error {
-	err := d.setClient()
-	if err == nil {
-		d.cron = cron.NewCron(time.Hour * 12)
-		d.cron.Do(func() {
-			_ = d.setClient()
-		})
+func (driver WebDav) Config() base.DriverConfig {
+	return base.DriverConfig{
+		Name:          "WebDav",
+		OnlyProxy:     true,
+		OnlyLocal:     true,
+		NoNeedSetLink: true,
+		LocalSort:     true,
 	}
-	return err
 }
 
-func (d *WebDav) Drop(ctx context.Context) error {
-	if d.cron != nil {
-		d.cron.Stop()
+func (driver WebDav) Items() []base.Item {
+	return []base.Item{
+		{
+			Name:     "site_url",
+			Label:    "webdav root url",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "username",
+			Label:    "username",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "password",
+			Label:    "password",
+			Type:     base.TypeString,
+			Required: true,
+		},
 	}
+}
+
+func (driver WebDav) Save(account *model.Account, old *model.Account) error {
+	if account == nil {
+		return nil
+	}
+	account.Status = "work"
+	_ = model.SaveAccount(account)
 	return nil
 }
 
-func (d *WebDav) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.client.ReadDir(dir.GetPath())
-	if err != nil {
-		return nil, err
-	}
-	return utils.SliceConvert(files, func(src os.FileInfo) (model.Obj, error) {
-		return &model.Object{
-			Name:     src.Name(),
-			Size:     src.Size(),
-			Modified: src.ModTime(),
-			IsFolder: src.IsDir(),
+func (driver WebDav) File(path string, account *model.Account) (*model.File, error) {
+	if path == "/" {
+		return &model.File{
+			Id:        "/",
+			Name:      account.Name,
+			Size:      0,
+			Type:      conf.FOLDER,
+			Driver:    driver.Config().Name,
+			UpdatedAt: account.UpdatedAt,
 		}, nil
-	})
-}
-
-func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	url, header, err := d.client.Link(file.GetPath())
+	}
+	dir, name := filepath.Split(path)
+	files, err := driver.Files(dir, account)
 	if err != nil {
 		return nil, err
 	}
-	return &model.Link{
-		URL:    url,
-		Header: header,
-	}, nil
-}
-
-func (d *WebDav) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	return d.client.MkdirAll(path.Join(parentDir.GetPath(), dirName), 0644)
-}
-
-func (d *WebDav) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
-	return d.client.Rename(getPath(srcObj), path.Join(dstDir.GetPath(), srcObj.GetName()), true)
-}
-
-func (d *WebDav) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	return d.client.Rename(getPath(srcObj), path.Join(path.Dir(srcObj.GetPath()), newName), true)
-}
-
-func (d *WebDav) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
-	return d.client.Copy(getPath(srcObj), path.Join(dstDir.GetPath(), srcObj.GetName()), true)
-}
-
-func (d *WebDav) Remove(ctx context.Context, obj model.Obj) error {
-	return d.client.RemoveAll(getPath(obj))
-}
-
-func (d *WebDav) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
-	callback := func(r *http.Request) {
-		r.Header.Set("Content-Type", stream.GetMimetype())
-		r.ContentLength = stream.GetSize()
+	for _, file := range files {
+		if file.Name == name {
+			return &file, nil
+		}
 	}
-	// TODO: support cancel
-	err := d.client.WriteStream(path.Join(dstDir.GetPath(), stream.GetName()), stream, 0644, callback)
+	return nil, base.ErrPathNotFound
+}
+
+func (driver WebDav) Files(path string, account *model.Account) ([]model.File, error) {
+	path = utils.ParsePath(path)
+	cache, err := base.GetCache(path, account)
+	if err == nil {
+		files, _ := cache.([]model.File)
+		return files, nil
+	}
+	c := driver.NewClient(account)
+	rawFiles, err := c.ReadDir(driver.WebDavPath(path))
+	if err != nil {
+		return nil, err
+	}
+	files := make([]model.File, 0)
+	if len(rawFiles) == 0 {
+		return files, nil
+	}
+	for _, f := range rawFiles {
+		t := f.ModTime()
+		file := model.File{
+			Name:      f.Name(),
+			Size:      f.Size(),
+			Driver:    driver.Config().Name,
+			UpdatedAt: &t,
+		}
+		if f.IsDir() {
+			file.Type = conf.FOLDER
+		} else {
+			file.Type = utils.GetFileType(filepath.Ext(f.Name()))
+		}
+		files = append(files, file)
+	}
+	_ = base.SetCache(path, files, account)
+	return files, nil
+}
+
+func (driver WebDav) Link(args base.Args, account *model.Account) (*base.Link, error) {
+	path := args.Path
+	c := driver.NewClient(account)
+	reader, err := c.ReadStream(driver.WebDavPath(path))
+	if err != nil {
+		return nil, err
+	}
+	return &base.Link{Data: reader}, nil
+}
+
+func (driver WebDav) Path(path string, account *model.Account) (*model.File, []model.File, error) {
+	file, err := driver.File(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !file.IsDir() {
+		return file, nil, nil
+	}
+	files, err := driver.Files(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, files, nil
+}
+
+//func (driver WebDav) Proxy(r *http.Request, account *model.Account) {
+//
+//}
+
+func (driver WebDav) Preview(path string, account *model.Account) (interface{}, error) {
+	return nil, base.ErrNotSupport
+}
+
+func (driver WebDav) MakeDir(path string, account *model.Account) error {
+	c := driver.NewClient(account)
+	err := c.MkdirAll(driver.WebDavPath(path), 0644)
 	return err
 }
 
-var _ driver.Driver = (*WebDav)(nil)
+func (driver WebDav) Move(src string, dst string, account *model.Account) error {
+	c := driver.NewClient(account)
+	err := c.Rename(driver.WebDavPath(src), driver.WebDavPath(dst), true)
+	return err
+}
+
+func (driver WebDav) Rename(src string, dst string, account *model.Account) error {
+	return driver.Move(src, dst, account)
+}
+
+func (driver WebDav) Copy(src string, dst string, account *model.Account) error {
+	c := driver.NewClient(account)
+	err := c.Copy(driver.WebDavPath(src), driver.WebDavPath(dst), true)
+	return err
+}
+
+func (driver WebDav) Delete(path string, account *model.Account) error {
+	c := driver.NewClient(account)
+	err := c.RemoveAll(driver.WebDavPath(path))
+	return err
+}
+
+func (driver WebDav) Upload(file *model.FileStream, account *model.Account) error {
+	if file == nil {
+		return base.ErrEmptyFile
+	}
+	c := driver.NewClient(account)
+	path := utils.Join(file.ParentPath, file.Name)
+	err := c.WriteStream(driver.WebDavPath(path), file, 0644)
+	return err
+}
+
+var _ base.Driver = (*WebDav)(nil)

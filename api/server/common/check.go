@@ -1,74 +1,51 @@
 package common
 
 import (
-	"path"
-	"regexp"
-	"strings"
-
-	"github.com/alist-org/alist/v3/internal/conf"
-	"github.com/alist-org/alist/v3/internal/driver"
-	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/internal/op"
-	"github.com/alist-org/alist/v3/pkg/utils"
+	"github.com/Xhofe/alist/conf"
+	"github.com/Xhofe/alist/model"
+	"github.com/Xhofe/alist/utils"
+	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
-func IsStorageSignEnabled(rawPath string) bool {
-	storage := op.GetBalancedStorage(rawPath)
-	return storage != nil && storage.GetStorage().EnableSign
+func Login(c *gin.Context) {
+	SuccessResp(c)
 }
 
-func CanWrite(meta *model.Meta, path string) bool {
-	if meta == nil || !meta.Write {
-		return false
-	}
-	return meta.WSub || meta.Path == path
-}
-
-func IsApply(metaPath, reqPath string, applySub bool) bool {
-	if utils.PathEqual(metaPath, reqPath) {
-		return true
-	}
-	return utils.IsSubPath(metaPath, reqPath) && applySub
-}
-
-func CanAccess(user *model.User, meta *model.Meta, reqPath string, password string) bool {
-	// if the reqPath is in hide (only can check the nearest meta) and user can't see hides, can't access
-	if meta != nil && !user.CanSeeHides() && meta.Hide != "" &&
-		IsApply(meta.Path, path.Dir(reqPath), meta.HSub) { // the meta should apply to the parent of current path
-		for _, hide := range strings.Split(meta.Hide, "\n") {
-			re := regexp.MustCompile(hide)
-			if re.MatchString(path.Base(reqPath)) {
-				return false
-			}
+func CheckParent(path string, password string) bool {
+	meta, err := model.GetMetaByPath(path)
+	if err == nil {
+		if meta.Password != "" && meta.Password != password {
+			return false
 		}
-	}
-	// if is not guest and can access without password
-	if user.CanAccessWithoutPassword() {
 		return true
+	} else {
+		if path == "/" {
+			return true
+		}
+		return CheckParent(utils.Dir(path), password)
 	}
-	// if meta is nil or password is empty, can access
-	if meta == nil || meta.Password == "" {
-		return true
-	}
-	// if meta doesn't apply to sub_folder, can access
-	if !utils.PathEqual(meta.Path, reqPath) && !meta.PSub {
-		return true
-	}
-	// validate password
-	return meta.Password == password
 }
 
-// ShouldProxy TODO need optimize
-// when should be proxy?
-// 1. config.MustProxy()
-// 2. storage.WebProxy
-// 3. proxy_types
-func ShouldProxy(storage driver.Driver, filename string) bool {
-	if storage.Config().MustProxy() || storage.GetStorage().WebProxy {
+func CheckDownLink(path string, passwordMd5 string, name string) bool {
+	if !conf.GetBool("check down link") {
 		return true
 	}
-	if utils.SliceContains(conf.SlicesMap[conf.ProxyTypes], utils.Ext(filename)) {
+	meta, err := model.GetMetaByPath(path)
+	log.Debugf("check down path: %s", path)
+	if err == nil {
+		log.Debugf("check down link: %s,%s", meta.Password, passwordMd5)
+		if meta.Password != "" && utils.SignWithPassword(name, meta.Password) != passwordMd5 {
+			return false
+		}
 		return true
+	} else {
+		if !conf.GetBool("check parent folder") {
+			return true
+		}
+		if path == "/" {
+			return true
+		}
+		return CheckDownLink(utils.Dir(path), passwordMd5, name)
 	}
-	return false
 }

@@ -1,118 +1,254 @@
 package ftp
 
 import (
-	"context"
-	stdpath "path"
-
-	"github.com/alist-org/alist/v3/internal/driver"
-	"github.com/alist-org/alist/v3/internal/errs"
-	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/Xhofe/alist/conf"
+	"github.com/Xhofe/alist/drivers/base"
+	"github.com/Xhofe/alist/model"
+	"github.com/Xhofe/alist/utils"
 	"github.com/jlaffaye/ftp"
+	log "github.com/sirupsen/logrus"
+	"path/filepath"
 )
 
-type FTP struct {
-	model.Storage
-	Addition
-	conn *ftp.ServerConn
-}
+type FTP struct{}
 
-func (d *FTP) Config() driver.Config {
-	return config
-}
-
-func (d *FTP) GetAddition() driver.Additional {
-	return &d.Addition
-}
-
-func (d *FTP) Init(ctx context.Context) error {
-	return d.login()
-}
-
-func (d *FTP) Drop(ctx context.Context) error {
-	if d.conn != nil {
-		_ = d.conn.Logout()
+func (driver FTP) Config() base.DriverConfig {
+	return base.DriverConfig{
+		Name:          "FTP",
+		OnlyProxy:     true,
+		OnlyLocal:     true,
+		NoNeedSetLink: true,
+		LocalSort:     true,
 	}
-	return nil
 }
 
-func (d *FTP) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	if err := d.login(); err != nil {
-		return nil, err
+func (driver FTP) Items() []base.Item {
+	return []base.Item{
+		{
+			Name:     "site_url",
+			Label:    "ftp host url",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "username",
+			Label:    "username",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "password",
+			Label:    "password",
+			Type:     base.TypeString,
+			Required: true,
+		},
+		{
+			Name:     "root_folder",
+			Label:    "root folder path",
+			Type:     base.TypeString,
+			Required: false,
+		},
 	}
-	entries, err := d.conn.List(dir.GetPath())
+}
+
+func (driver FTP) Save(account *model.Account, old *model.Account) error {
+	if old != nil {
+		conn, ok := connMap[old.Name]
+		if ok {
+			err := conn.Quit()
+			log.Error("ftp:", err)
+			delete(connMap, old.Name)
+		}
+	}
+	if account == nil {
+		return nil
+	}
+	if account.RootFolder == "" {
+		account.RootFolder = "/"
+	}
+	_, err := driver.Login(account)
+	if err != nil {
+		account.Status = err.Error()
+	} else {
+		account.Status = "work"
+	}
+	_ = model.SaveAccount(account)
+	return err
+}
+
+func (driver FTP) File(path string, account *model.Account) (*model.File, error) {
+	log.Debugf("file: %s", path)
+	path = utils.ParsePath(path)
+	if path == "/" {
+		return &model.File{
+			Id:        account.RootFolder,
+			Name:      account.Name,
+			Size:      0,
+			Type:      conf.FOLDER,
+			Driver:    driver.Config().Name,
+			UpdatedAt: account.UpdatedAt,
+		}, nil
+	}
+	dir, name := filepath.Split(path)
+	files, err := driver.Files(dir, account)
 	if err != nil {
 		return nil, err
 	}
-	res := make([]model.Obj, 0)
-	for _, entry := range entries {
+	for _, file := range files {
+		if file.Name == name {
+			return &file, nil
+		}
+	}
+	return nil, base.ErrPathNotFound
+}
+
+func (driver FTP) Files(path string, account *model.Account) ([]model.File, error) {
+	log.Debugf("files: %s", path)
+	path = utils.ParsePath(path)
+	cache, err := base.GetCache(path, account)
+	if err == nil {
+		files, _ := cache.([]model.File)
+		return files, nil
+	}
+	realPath := utils.Join(account.RootFolder, path)
+	conn, err := driver.Login(account)
+	if err != nil {
+		return nil, err
+	}
+	//defer func() { _ = conn.Quit() }()
+	entries, err := conn.List(realPath)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]model.File, 0)
+	for i, _ := range entries {
+		entry := entries[i]
 		if entry.Name == "." || entry.Name == ".." {
 			continue
 		}
-		f := model.Object{
-			Name:     entry.Name,
-			Size:     int64(entry.Size),
-			Modified: entry.Time,
-			IsFolder: entry.Type == ftp.EntryTypeFolder,
+		f := model.File{
+			Name:      entry.Name,
+			Size:      int64(entry.Size),
+			UpdatedAt: &entry.Time,
+			Driver:    driver.Config().Name,
 		}
-		res = append(res, &f)
+		if entry.Type == ftp.EntryTypeFolder {
+			f.Type = conf.FOLDER
+		} else {
+			f.Type = utils.GetFileType(filepath.Ext(entry.Name))
+		}
+		res = append(res, f)
+	}
+	if len(res) > 0 {
+		_ = base.SetCache(path, res, account)
 	}
 	return res, nil
 }
 
-func (d *FTP) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	if err := d.login(); err != nil {
+func (driver FTP) Link(args base.Args, account *model.Account) (*base.Link, error) {
+	path := args.Path
+	path = utils.ParsePath(path)
+	realPath := utils.Join(account.RootFolder, path)
+	conn, err := driver.Login(account)
+	if err != nil {
 		return nil, err
 	}
-
-	r := NewFileReader(d.conn, file.GetPath(), file.GetSize())
-	link := &model.Link{
-		MFile: r,
+	//defer func() { _ = conn.Quit() }()
+	resp, err := conn.Retr(realPath)
+	if err != nil {
+		return nil, err
 	}
-	return link, nil
+	//defer func() { _ = resp.Close() }()
+	//data, err := ioutil.ReadAll(resp)
+	//if err != nil {
+	//	return nil, err
+	//}
+	return &base.Link{
+		Data: resp,
+	}, nil
 }
 
-func (d *FTP) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	if err := d.login(); err != nil {
+func (driver FTP) Path(path string, account *model.Account) (*model.File, []model.File, error) {
+	log.Debugf("ftp path: %s", path)
+	file, err := driver.File(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !file.IsDir() {
+		//file.Url, _ = driver.Link(path, account)
+		return file, nil, nil
+	}
+	files, err := driver.Files(path, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, files, nil
+}
+
+//func (driver FTP) Proxy(r *http.Request, account *model.Account) {
+//
+//}
+
+func (driver FTP) Preview(path string, account *model.Account) (interface{}, error) {
+	return nil, base.ErrNotSupport
+}
+
+func (driver FTP) MakeDir(path string, account *model.Account) error {
+	path = utils.ParsePath(path)
+	realPath := utils.Join(account.RootFolder, path)
+	conn, err := driver.Login(account)
+	if err != nil {
 		return err
 	}
-	return d.conn.MakeDir(stdpath.Join(parentDir.GetPath(), dirName))
+	//defer func() { _ = conn.Quit() }()
+	err = conn.MakeDir(realPath)
+	return err
 }
 
-func (d *FTP) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
-	if err := d.login(); err != nil {
+func (driver FTP) Move(src string, dst string, account *model.Account) error {
+	realSrc := utils.Join(account.RootFolder, src)
+	realDst := utils.Join(account.RootFolder, dst)
+	conn, err := driver.Login(account)
+	if err != nil {
 		return err
 	}
-	return d.conn.Rename(srcObj.GetPath(), stdpath.Join(dstDir.GetPath(), srcObj.GetName()))
+	//defer func() { _ = conn.Quit() }()
+	err = conn.Rename(realSrc, realDst)
+	return err
 }
 
-func (d *FTP) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	if err := d.login(); err != nil {
+func (driver FTP) Rename(src string, dst string, account *model.Account) error {
+	return driver.Move(src, dst, account)
+}
+
+func (driver FTP) Copy(src string, dst string, account *model.Account) error {
+	return base.ErrNotSupport
+}
+
+func (driver FTP) Delete(path string, account *model.Account) error {
+	path = utils.ParsePath(path)
+	realPath := utils.Join(account.RootFolder, path)
+	conn, err := driver.Login(account)
+	if err != nil {
 		return err
 	}
-	return d.conn.Rename(srcObj.GetPath(), stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName))
+	//defer func() { _ = conn.Quit() }()
+	err = conn.Delete(realPath)
+	return err
 }
 
-func (d *FTP) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
-	return errs.NotSupport
-}
-
-func (d *FTP) Remove(ctx context.Context, obj model.Obj) error {
-	if err := d.login(); err != nil {
+func (driver FTP) Upload(file *model.FileStream, account *model.Account) error {
+	if file == nil {
+		return base.ErrEmptyFile
+	}
+	realPath := utils.Join(account.RootFolder, file.ParentPath, file.Name)
+	conn, err := driver.Login(account)
+	if err != nil {
 		return err
 	}
-	if obj.IsDir() {
-		return d.conn.RemoveDirRecur(obj.GetPath())
-	} else {
-		return d.conn.Delete(obj.GetPath())
-	}
+	//defer func() { _ = conn.Quit() }()
+	err = conn.Stor(realPath, file)
+	return err
 }
 
-func (d *FTP) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
-	if err := d.login(); err != nil {
-		return err
-	}
-	// TODO: support cancel
-	return d.conn.Stor(stdpath.Join(dstDir.GetPath(), stream.GetName()), stream)
-}
-
-var _ driver.Driver = (*FTP)(nil)
+var _ base.Driver = (*FTP)(nil)
